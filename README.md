@@ -7,6 +7,12 @@ A small, friendly Flutter app for making French press coffee. Two things, done w
 
 The coffee-to-water ratio and alarm sound are saved on the device.
 
+## Screenshots
+
+| Main screen | Settings |
+|:---:|:---:|
+| <img src="docs/screenshots/main.jpg" alt="Coffee's Ready! main screen" width="320"> | <img src="docs/screenshots/settings.jpg" alt="Coffee's Ready! settings screen" width="320"> |
+
 ## Android
 
 Built and tested with Flutter 3.50.1 and Android SDK 36/37.
