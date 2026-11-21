@@ -20,11 +20,17 @@ void main() {
       expect(formatClock(Duration.zero), '00:00');
       expect(formatClock(const Duration(milliseconds: -900)), '00:00');
     });
+
+    test('timer shows elapsed time as negative', () {
+      expect(formatTimer(const Duration(seconds: 5)), '00:05');
+      expect(formatTimer(const Duration(seconds: -5)), '-00:05');
+      expect(formatTimer(const Duration(seconds: -65)), '-01:05');
+    });
   });
 
-  test('presets default to 2:15, 2:25 and 2:35', () {
+  test('timer preset defaults to 2:25', () {
     final presets = BrewSettings().presets;
-    expect(presets.map((preset) => preset.inSeconds).toList(), [135, 145, 155]);
+    expect(presets.map((preset) => preset.inSeconds).toList(), [145]);
   });
 
   test('ships with the Timer Event alarm by default', () {
@@ -40,8 +46,8 @@ void main() {
     expect(find.text('02:25'), findsOneWidget);
     expect(find.text('14'), findsOneWidget);
     expect(find.text('1 : 16'), findsOneWidget);
-    expect(find.text('2:15'), findsOneWidget);
-    expect(find.text('2:35'), findsOneWidget);
+    expect(find.text('- 5 s'), findsOneWidget);
+    expect(find.text('+ 5 s'), findsOneWidget);
   });
 
   testWidgets('presets can be adjusted in settings on a phone screen', (
@@ -72,19 +78,19 @@ void main() {
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
 
-    expect(find.text('TIMER PRESETS'), findsOneWidget);
-    expect(find.text('02:15'), findsOneWidget);
+    expect(find.text('TIMER DURATION'), findsOneWidget);
+    expect(find.text('02:25'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
-    await tester.tap(find.byTooltip('Preset 1, 5 seconds longer'));
+    await tester.tap(find.byTooltip('Timer, 5 seconds longer'));
     await tester.pumpAndSettle();
 
-    expect(find.text('02:20'), findsOneWidget);
-    expect(settings.presets.first, const Duration(minutes: 2, seconds: 20));
+    expect(find.text('02:30'), findsOneWidget);
+    expect(settings.presets.first, const Duration(minutes: 2, seconds: 30));
 
     await tester.pageBack();
     await tester.pumpAndSettle();
-    expect(find.text('2:20'), findsOneWidget);
+    expect(find.text('02:30'), findsOneWidget);
   });
 
   testWidgets('notification actions stop or extend the timer', (tester) async {

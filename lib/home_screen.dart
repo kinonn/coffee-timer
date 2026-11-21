@@ -28,8 +28,7 @@ class HomeScreen extends StatefulWidget {
 
 enum _TimerStatus { idle, running, paused, finished }
 
-class _HomeScreenState extends State<HomeScreen> {
-  static const _defaultTimer = Duration(minutes: 2, seconds: 25);
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   static const _minTimer = Duration(seconds: BrewSettings.minTimerSeconds);
   static const _maxTimer = Duration(seconds: BrewSettings.maxTimerSeconds);
   static final _coffeePattern = RegExp(r'^\d{0,3}([.,]\d{0,2})?$');
@@ -47,9 +46,9 @@ class _HomeScreenState extends State<HomeScreen> {
     return newValue;
   });
 
-  late Duration _selected = _defaultTimer;
-  late Duration _remaining = _defaultTimer;
-  late Duration _total = _defaultTimer;
+  late Duration _selected;
+  late Duration _remaining;
+  late Duration _total;
   DateTime? _endsAt;
   Timer? _ticker;
   _TimerStatus _status = _TimerStatus.idle;
@@ -57,6 +56,11 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    final initial = widget.settings.presets.first;
+    _selected = initial;
+    _remaining = initial;
+    _total = initial;
     _coffeeFocus.addListener(_handleCoffeeFocus);
     NativeBridge.notificationActions.addListener(_handleNotificationAction);
     WidgetsBinding.instance.addPostFrameCallback(
@@ -67,12 +71,32 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _ticker?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(NativeBridge.cancelRunningNotification());
     NativeBridge.notificationActions.removeListener(_handleNotificationAction);
     _coffeeFocus.removeListener(_handleCoffeeFocus);
     _coffeeFocus.dispose();
     _coffeeController.dispose();
     unawaited(NativeBridge.stopAlarm());
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      unawaited(NativeBridge.cancelRunningNotification());
+      return;
+    }
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      final endsAt = _endsAt;
+      if (_status == _TimerStatus.running && endsAt != null) {
+        unawaited(
+          NativeBridge.showRunningNotification(endsAt.millisecondsSinceEpoch),
+        );
+      }
+    }
   }
 
   void _handleNotificationAction() {
@@ -102,7 +126,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final total = _total.inMilliseconds;
     if (total <= 0) return 0;
     final left = _remaining.inMilliseconds.clamp(0, total).toInt();
-    return 1 - left / total;
+    return left / total;
   }
 
   String _formatGrams(double grams) {
@@ -164,6 +188,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final base = resuming ? _remaining : _selected;
     if (base <= Duration.zero) return;
     unawaited(NativeBridge.requestNotificationPermission());
+    unawaited(NativeBridge.cancelRunningNotification());
     unawaited(NativeBridge.stopAlarm());
     _ticker?.cancel();
     setState(() {
@@ -177,6 +202,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _pauseTimer() {
     _ticker?.cancel();
+    unawaited(NativeBridge.cancelRunningNotification());
     final left = _endsAt?.difference(DateTime.now()) ?? _remaining;
     setState(() {
       _remaining = left > Duration.zero ? left : Duration.zero;
@@ -188,21 +214,16 @@ class _HomeScreenState extends State<HomeScreen> {
     final endsAt = _endsAt;
     if (endsAt == null) return;
     final left = endsAt.difference(DateTime.now());
-    if (left <= Duration.zero) {
+    setState(() => _remaining = left);
+    if (left <= Duration.zero && _status != _TimerStatus.finished) {
       _finishTimer();
-    } else {
-      setState(() => _remaining = left);
     }
   }
 
   void _finishTimer() {
-    _ticker?.cancel();
-    _ticker = null;
-    setState(() {
-      _remaining = Duration.zero;
-      _status = _TimerStatus.finished;
-    });
+    setState(() => _status = _TimerStatus.finished);
     unawaited(HapticFeedback.heavyImpact());
+    unawaited(NativeBridge.cancelRunningNotification());
     unawaited(NativeBridge.playAlarm(widget.settings.alarmUri, loop: true));
     unawaited(NativeBridge.showTimerNotification());
   }
@@ -224,6 +245,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void _resetTimer() {
     _ticker?.cancel();
     _ticker = null;
+    unawaited(NativeBridge.cancelRunningNotification());
     unawaited(NativeBridge.stopAlarm());
     setState(() {
       _status = _TimerStatus.idle;
@@ -240,7 +262,15 @@ class _HomeScreenState extends State<HomeScreen> {
         builder: (_) => SettingsScreen(settings: widget.settings),
       ),
     );
-    if (mounted) setState(() {});
+    if (mounted) {
+      setState(() {
+        if (_status == _TimerStatus.idle) {
+          _selected = widget.settings.presets.first;
+          _remaining = _selected;
+          _total = _selected;
+        }
+      });
+    }
   }
 
   String get _statusLabel {
@@ -300,22 +330,32 @@ class _HomeScreenState extends State<HomeScreen> {
       body: Container(
         decoration: appBackground,
         child: SafeArea(
-          child: Column(
-            children: [
-              _header(),
-              Expanded(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(24, 6, 24, 32),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              return FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.topCenter,
+                child: SizedBox(
+                  width: constraints.maxWidth,
                   child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      _coffeeCard(),
-                      const SizedBox(height: 18),
-                      _timerCard(),
+                      _header(),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 6, 24, 32),
+                        child: Column(
+                          children: [
+                            _coffeeCard(),
+                            const SizedBox(height: 18),
+                            _timerCard(),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
                 ),
-              ),
-            ],
+              );
+            },
           ),
         ),
       ),
@@ -409,18 +449,14 @@ class _HomeScreenState extends State<HomeScreen> {
           const Divider(height: 1, color: kLine),
           const SizedBox(height: 16),
           Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Container(
+              SizedBox(
                 width: 46,
-                height: 46,
-                decoration: const BoxDecoration(
-                  color: kLatte,
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(
-                  Icons.water_drop_outlined,
-                  color: kCaramel,
-                  size: 22,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Text('WATER', style: kLabelStyle),
                 ),
               ),
               Expanded(
@@ -450,12 +486,17 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
               ),
-              SizedBox(
+              Container(
                 width: 46,
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerRight,
-                  child: Text('WATER', style: kLabelStyle),
+                height: 46,
+                decoration: const BoxDecoration(
+                  color: kLatte,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.water_drop_outlined,
+                  color: kCaramel,
+                  size: 22,
                 ),
               ),
             ],
@@ -621,27 +662,9 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            child: Text(
-              formatClock(display),
-              style: const TextStyle(
-                fontSize: 78,
-                height: 1,
-                fontWeight: FontWeight.w600,
-                letterSpacing: -1.5,
-                color: kCream,
-                fontFeatures: [FontFeature.tabularFigures()],
-              ),
-            ),
-          ),
-          const SizedBox(height: 18),
-          ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 112),
-            child: Center(child: _timerMiddle()),
-          ),
           const SizedBox(height: 16),
+          _timerDial(display),
+          const SizedBox(height: 24),
           Row(
             children: [
               Expanded(
@@ -710,130 +733,80 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _timerMiddle() {
-    if (_status == _TimerStatus.idle) {
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Wrap(
-            alignment: WrapAlignment.center,
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final preset in widget.settings.presets) _presetChip(preset),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Wrap(
-            alignment: WrapAlignment.center,
-            spacing: 10,
-            runSpacing: 8,
-            children: [
-              _adjustButton(
-                icon: Icons.remove_rounded,
-                tooltip: '5 seconds shorter',
-                onPressed: _selected > _minTimer
-                    ? () => _adjustDuration(-5)
-                    : null,
-              ),
-              _adjustButton(
-                icon: Icons.add_rounded,
-                tooltip: '5 seconds longer',
-                onPressed: _selected < _maxTimer
-                    ? () => _adjustDuration(5)
-                    : null,
-              ),
-            ],
-          ),
-        ],
-      );
-    }
-
-    final finished = _status == _TimerStatus.finished;
-    final caption = finished
-        ? 'Your coffee is ready'
-        : _status == _TimerStatus.paused
-        ? 'Paused'
-        : 'of ${formatClock(_total)}';
-    return Column(
-      mainAxisSize: MainAxisSize.min,
+  Widget _adjustRow() {
+    return Wrap(
+      alignment: WrapAlignment.center,
+      spacing: 10,
+      runSpacing: 8,
       children: [
-        SizedBox(
-          width: double.infinity,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(99),
-            child: LinearProgressIndicator(
-              value: finished ? 1 : _progress,
-              minHeight: 6,
-              backgroundColor: Colors.white.withValues(alpha: 0.08),
-              valueColor: const AlwaysStoppedAnimation<Color>(kCaramel),
-            ),
-          ),
+        _adjustButton(
+          label: '- 5 s',
+          tooltip: '5 seconds shorter',
+          onPressed: _selected > _minTimer ? () => _adjustDuration(-5) : null,
         ),
-        const SizedBox(height: 12),
-        Text(
-          caption,
-          style: TextStyle(fontSize: 12, color: kCream.withValues(alpha: 0.68)),
+        _adjustButton(
+          label: '+ 5 s',
+          tooltip: '5 seconds longer',
+          onPressed: _selected < _maxTimer ? () => _adjustDuration(5) : null,
         ),
       ],
     );
   }
 
-  Widget _presetChip(Duration duration) {
-    final selected = _selected == duration;
-    return Semantics(
-      button: true,
-      selected: selected,
-      label: 'Set timer to ${_presetLabel(duration)}',
-      excludeSemantics: true,
-      onTap: () => _setDuration(duration),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: () => _setDuration(duration),
-          borderRadius: BorderRadius.circular(99),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 160),
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            decoration: BoxDecoration(
-              color: selected ? kCaramel : Colors.white.withValues(alpha: 0.06),
-              borderRadius: BorderRadius.circular(99),
-              border: Border.all(
-                color: selected
-                    ? kCaramel
-                    : Colors.white.withValues(alpha: 0.12),
+  Widget _timerDial(Duration display) {
+    const size = 228.0;
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          SizedBox.expand(
+            child: CircularProgressIndicator(
+              value: _status == _TimerStatus.idle ? 0 : _progress,
+              backgroundColor: Colors.white.withValues(alpha: 0.10),
+              valueColor: AlwaysStoppedAnimation<Color>(
+                _status == _TimerStatus.idle ? Colors.transparent : kCaramel,
               ),
+              strokeWidth: 7,
+              strokeCap: StrokeCap.round,
             ),
+          ),
+          FittedBox(
+            fit: BoxFit.scaleDown,
             child: Text(
-              _presetLabel(duration),
-              style: TextStyle(
-                fontSize: 12.5,
+              formatTimer(display),
+              style: const TextStyle(
+                fontSize: 56,
+                height: 1,
                 fontWeight: FontWeight.w600,
-                color: selected ? kEspresso : kCream.withValues(alpha: 0.8),
+                letterSpacing: -1.5,
+                color: kCream,
+                fontFeatures: [FontFeature.tabularFigures()],
               ),
             ),
           ),
-        ),
+          if (_status == _TimerStatus.idle)
+            Positioned(
+              top: size / 2 + 38,
+              left: 0,
+              right: 0,
+              child: _adjustRow(),
+            ),
+        ],
       ),
     );
   }
 
-  String _presetLabel(Duration duration) {
-    final seconds = (duration.inSeconds % 60).toString().padLeft(2, '0');
-    return '${duration.inMinutes}:$seconds';
-  }
-
   Widget _adjustButton({
-    required IconData icon,
+    required String label,
     required String tooltip,
     required VoidCallback? onPressed,
   }) {
     return Tooltip(
       message: tooltip,
-      child: OutlinedButton.icon(
+      child: OutlinedButton(
         onPressed: onPressed,
-        icon: Icon(icon, size: 17),
-        label: const Text('5 s'),
         style: OutlinedButton.styleFrom(
           foregroundColor: kCream,
           disabledForegroundColor: kCream.withValues(alpha: 0.3),
@@ -848,6 +821,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           shape: const StadiumBorder(),
         ),
+        child: Text(label),
       ),
     );
   }

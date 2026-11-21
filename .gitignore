@@ -58,3 +58,6 @@ key.properties
 # Local editor/tool state
 .opencode/
 .vscode/
+
+# Local UI design previews
+/docs/preview/

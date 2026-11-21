@@ -196,17 +196,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('TIMER PRESETS', style: kLabelStyle),
+          const Text('TIMER DURATION', style: kLabelStyle),
           const SizedBox(height: 6),
           const Text(
-            'Quick timers shown on the main screen.',
+            'Starting time for the brew timer.',
             style: TextStyle(fontSize: 12, color: kRoast),
           ),
           const SizedBox(height: 4),
-          for (var i = 0; i < widget.settings.presets.length; i++) ...[
-            if (i > 0) const Divider(height: 1, color: kLine),
-            _presetRow(i),
-          ],
+          _presetRow(0),
         ],
       ),
     );
@@ -234,13 +231,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const Spacer(),
           _presetAdjustButton(
             icon: Icons.remove_rounded,
-            tooltip: 'Preset ${index + 1}, 5 seconds shorter',
+            tooltip: 'Timer, 5 seconds shorter',
             onPressed: canDecrease ? () => _changePreset(index, -5) : null,
           ),
           const SizedBox(width: 4),
           _presetAdjustButton(
             icon: Icons.add_rounded,
-            tooltip: 'Preset ${index + 1}, 5 seconds longer',
+            tooltip: 'Timer, 5 seconds longer',
             onPressed: canIncrease ? () => _changePreset(index, 5) : null,
           ),
         ],

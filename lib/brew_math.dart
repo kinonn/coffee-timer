@@ -15,3 +15,7 @@ String formatClock(Duration duration) {
   final seconds = (totalSeconds % 60).toString().padLeft(2, '0');
   return '$minutes:$seconds';
 }
+
+/// Formats a timer value, showing -mm:ss once the timer has elapsed.
+String formatTimer(Duration duration) =>
+    duration < Duration.zero ? '-${formatClock(-duration)}' : formatClock(duration);

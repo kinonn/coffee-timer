@@ -57,6 +57,28 @@ class NativeBridge {
     }
   }
 
+  static Future<void> showRunningNotification(int endAtMillis) async {
+    try {
+      await _channel.invokeMethod<void>('showRunningNotification', {
+        'endAt': endAtMillis,
+      });
+    } on PlatformException {
+      // Best effort; the timer still counts down in-app.
+    } on MissingPluginException {
+      // No notification bridge on this platform.
+    }
+  }
+
+  static Future<void> cancelRunningNotification() async {
+    try {
+      await _channel.invokeMethod<void>('cancelRunningNotification');
+    } on PlatformException {
+      // Nothing to cancel.
+    } on MissingPluginException {
+      // No notification bridge on this platform.
+    }
+  }
+
   static Future<String?> takeNotificationAction() async {
     try {
       return await _channel.invokeMethod<String>('takeNotificationAction');

@@ -15,6 +15,8 @@ import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.RemoteViews
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -25,6 +27,15 @@ class MainActivity : FlutterActivity() {
     private var previewPlayer: MediaPlayer? = null
     private var methodChannel: MethodChannel? = null
     private var pendingNotificationAction: String? = null
+    private var runningEndAt = 0L
+    private val runningHandler = Handler(Looper.getMainLooper())
+    private val runningUpdate = object : Runnable {
+        override fun run() {
+            if (runningEndAt == 0L) return
+            updateRunningNotification()
+            runningHandler.postDelayed(this, 1000L)
+        }
+    }
 
     private val prefs by lazy { getSharedPreferences("coffee_timer", MODE_PRIVATE) }
     private val defaultPresets = listOf(135, 145, 155)
@@ -68,6 +79,15 @@ class MainActivity : FlutterActivity() {
                 }
                 "showTimerNotification" -> {
                     showTimerNotification()
+                    result.success(null)
+                }
+                "showRunningNotification" -> {
+                    val endAt = (call.arguments as? Map<*, *>)?.get("endAt") as? Number
+                    if (endAt != null) startRunningNotification(endAt.toLong())
+                    result.success(null)
+                }
+                "cancelRunningNotification" -> {
+                    cancelRunningNotification()
                     result.success(null)
                 }
                 "requestNotificationPermission" -> {
@@ -117,11 +137,7 @@ class MainActivity : FlutterActivity() {
     @Suppress("DEPRECATION")
     private fun showTimerNotification() {
         ensureNotificationChannel()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            return
-        }
+        if (!hasNotificationPermission()) return
 
         val contentIntent = PendingIntent.getActivity(
             this,
@@ -188,6 +204,79 @@ class MainActivity : FlutterActivity() {
 
         getSystemService(NotificationManager::class.java)
             ?.notify(NOTIFICATION_ID, builder.build())
+    }
+
+    private fun startRunningNotification(endAt: Long) {
+        runningEndAt = endAt
+        runningHandler.removeCallbacks(runningUpdate)
+        updateRunningNotification()
+        runningHandler.postDelayed(runningUpdate, 1000L)
+    }
+
+    private fun updateRunningNotification() {
+        showRunningNotification(formatTimerTime(runningEndAt - System.currentTimeMillis()))
+    }
+
+    private fun formatTimerTime(ms: Long): String {
+        val seconds = if (ms < 0) {
+            (-ms + 999) / 1000
+        } else {
+            (ms + 999) / 1000
+        }
+        val prefix = if (ms < 0) "-" else ""
+        return "$prefix%02d:%02d".format(seconds / 60, seconds % 60)
+    }
+
+    private fun showRunningNotification(time: String) {
+        ensureNotificationChannel()
+        if (!hasNotificationPermission()) return
+
+        val contentIntent = PendingIntent.getActivity(
+            this,
+            13,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            Notification.Builder(this).setPriority(Notification.PRIORITY_LOW)
+        }
+
+        builder
+            .setSmallIcon(R.drawable.ic_stat_coffee)
+            .setContentTitle("Brewing")
+            .setContentText(time)
+            .setColor(Color.parseColor("#33221A"))
+            .setCategory(Notification.CATEGORY_PROGRESS)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setContentIntent(contentIntent)
+            .setAutoCancel(false)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            builder.setSound(null)
+        }
+
+        getSystemService(NotificationManager::class.java)
+            ?.notify(RUNNING_NOTIFICATION_ID, builder.build())
+    }
+
+    private fun hasNotificationPermission(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
+        return checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun cancelRunningNotification() {
+        runningEndAt = 0L
+        runningHandler.removeCallbacks(runningUpdate)
+        getSystemService(NotificationManager::class.java)?.cancel(RUNNING_NOTIFICATION_ID)
     }
 
     private fun ensureNotificationChannel() {
@@ -289,6 +378,7 @@ class MainActivity : FlutterActivity() {
         releasePlayer(player)
         player = null
         cancelTimerNotification()
+        cancelRunningNotification()
     }
 
     private fun stopPreview() {
@@ -357,6 +447,7 @@ class MainActivity : FlutterActivity() {
     private companion object {
         const val CHANNEL_ID = "brew_timer"
         const val NOTIFICATION_ID = 2401
+        const val RUNNING_NOTIFICATION_ID = 2402
         const val ACTION_STOP = "com.kinonn.coffee_timer.action.STOP_TIMER"
         const val ACTION_ADD_15 = "com.kinonn.coffee_timer.action.ADD_15_SECONDS"
         const val BUNDLED_ALARM_URI = "app:timer_event"

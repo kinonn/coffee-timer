@@ -16,9 +16,7 @@ class BrewSettings {
   static const int maxTimerSeconds = 30 * 60;
 
   static const List<Duration> defaultPresets = [
-    Duration(minutes: 2, seconds: 15),
     Duration(minutes: 2, seconds: 25),
-    Duration(minutes: 2, seconds: 35),
   ];
 
   int ratio;
