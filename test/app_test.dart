@@ -3,7 +3,32 @@ import 'package:coffee_timer/brew_settings.dart';
 import 'package:coffee_timer/main.dart';
 import 'package:coffee_timer/native_bridge.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+List<MethodCall> _installNativeMock({
+  Map<String, Object?>? state,
+  bool startTimerResult = true,
+  bool canScheduleExactAlarms = true,
+}) {
+  final calls = <MethodCall>[];
+  const channel = MethodChannel('coffee_timer/native');
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(channel, (call) async {
+    calls.add(call);
+    if (call.method == 'timerState') {
+      return state ?? const <String, Object?>{};
+    }
+    if (call.method == 'startTimer') return startTimerResult;
+    if (call.method == 'canScheduleExactAlarms') {
+      return canScheduleExactAlarms;
+    }
+    return null;
+  });
+  addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+  return calls;
+}
 
 void main() {
   group('brew math', () {
@@ -94,6 +119,7 @@ void main() {
   });
 
   testWidgets('notification actions stop or extend the timer', (tester) async {
+    _installNativeMock();
     addTearDown(() => NativeBridge.notificationActions.value = null);
 
     await tester.pumpWidget(CoffeeTimerApp(settings: BrewSettings()));
@@ -107,5 +133,197 @@ void main() {
     await tester.pump();
     expect(find.text('02:25'), findsOneWidget);
     expect(find.text('READY TO BREW'), findsOneWidget);
+  });
+
+  testWidgets('start hands the deadline to the native timer service', (
+    tester,
+  ) async {
+    final calls = _installNativeMock();
+    final settings = BrewSettings(presets: [const Duration(seconds: 5)]);
+
+    await tester.pumpWidget(CoffeeTimerApp(settings: settings));
+    await tester.tap(find.text('Start brewing'));
+    await tester.pump();
+
+    final start = calls.singleWhere((call) => call.method == 'startTimer');
+    final args = start.arguments as Map<Object?, Object?>;
+    expect(args['totalMs'], 5000);
+    expect(args['alarmUri'], kBundledAlarmUri);
+    final expected = DateTime.now().millisecondsSinceEpoch + 5000;
+    expect(((args['endAt'] as int) - expected).abs(), lessThan(1000));
+  });
+
+  testWidgets('pause cancels the native timer', (tester) async {
+    final calls = _installNativeMock();
+    final settings = BrewSettings(presets: [const Duration(seconds: 5)]);
+
+    await tester.pumpWidget(CoffeeTimerApp(settings: settings));
+    await tester.tap(find.text('Start brewing'));
+    await tester.pump();
+    await tester.tap(find.text('Pause'));
+    await tester.pump();
+
+    expect(calls.any((call) => call.method == 'cancelTimer'), isTrue);
+  });
+
+  testWidgets('a refused native start returns the timer to idle', (
+    tester,
+  ) async {
+    _installNativeMock(startTimerResult: false);
+    final settings = BrewSettings(presets: [const Duration(seconds: 5)]);
+
+    await tester.pumpWidget(CoffeeTimerApp(settings: settings));
+    await tester.tap(find.text('Start brewing'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('READY TO BREW'), findsOneWidget);
+    expect(find.text('Start brewing'), findsOneWidget);
+  });
+
+  testWidgets('offers to enable exact alarms when they are unavailable', (
+    tester,
+  ) async {
+    final calls = _installNativeMock(canScheduleExactAlarms: false);
+    final settings = BrewSettings(presets: [const Duration(seconds: 5)]);
+
+    await tester.pumpWidget(CoffeeTimerApp(settings: settings));
+    await tester.tap(find.text('Start brewing'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Allow exact alarms?'), findsOneWidget);
+
+    await tester.tap(find.text('Open settings'));
+    await tester.pump();
+
+    expect(calls.any((call) => call.method == 'requestExactAlarms'), isTrue);
+  });
+
+  testWidgets('a native timer is picked up when the app resumes', (
+    tester,
+  ) async {
+    _installNativeMock(
+      state: {
+        'running': true,
+        'finished': false,
+        'endAt': DateTime.now()
+            .add(const Duration(seconds: 90))
+            .millisecondsSinceEpoch,
+        'totalMs': const Duration(minutes: 2).inMilliseconds,
+        'alarmUri': kBundledAlarmUri,
+        'alarmTitle': kBundledAlarmTitle,
+      },
+    );
+
+    await tester.pumpWidget(CoffeeTimerApp(settings: BrewSettings()));
+    expect(find.text('READY TO BREW'), findsOneWidget);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+
+    expect(find.text('BREWING'), findsOneWidget);
+  });
+
+  testWidgets('the +15 action schedules fifteen seconds natively', (
+    tester,
+  ) async {
+    final calls = _installNativeMock();
+    addTearDown(() => NativeBridge.notificationActions.value = null);
+
+    await tester.pumpWidget(CoffeeTimerApp(settings: BrewSettings()));
+    NativeBridge.notificationActions.value = 'add15';
+    await tester.pump();
+
+    final start = calls.lastWhere((call) => call.method == 'startTimer');
+    final args = start.arguments as Map<Object?, Object?>;
+    expect(args['totalMs'], 15000);
+  });
+
+  testWidgets('leaving the screen keeps the native timer running', (
+    tester,
+  ) async {
+    final calls = _installNativeMock();
+    final settings = BrewSettings(presets: [const Duration(seconds: 5)]);
+
+    await tester.pumpWidget(CoffeeTimerApp(settings: settings));
+    await tester.tap(find.text('Start brewing'));
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+
+    expect(calls.any((call) => call.method == 'cancelTimer'), isFalse);
+  });
+
+  testWidgets('a running native timer is restored when the app reopens', (
+    tester,
+  ) async {
+    _installNativeMock();
+    final timer = NativeTimerState(
+      running: true,
+      finished: false,
+      endAtMillis: DateTime.now()
+          .add(const Duration(seconds: 90))
+          .millisecondsSinceEpoch,
+      totalMillis: const Duration(minutes: 2).inMilliseconds,
+    );
+
+    await tester.pumpWidget(
+      CoffeeTimerApp(settings: BrewSettings(), timer: timer),
+    );
+    await tester.pump();
+
+    expect(find.text('BREWING'), findsOneWidget);
+    expect(find.text('02:25'), findsNothing);
+    expect(find.text('Start brewing'), findsNothing);
+  });
+
+  testWidgets('a finished native timer is restored as time is up', (
+    tester,
+  ) async {
+    _installNativeMock();
+    final timer = NativeTimerState(
+      running: true,
+      finished: true,
+      endAtMillis: DateTime.now()
+          .subtract(const Duration(seconds: 5))
+          .millisecondsSinceEpoch,
+      totalMillis: const Duration(minutes: 1).inMilliseconds,
+    );
+
+    await tester.pumpWidget(
+      CoffeeTimerApp(settings: BrewSettings(), timer: timer),
+    );
+    await tester.pump();
+
+    expect(find.text("TIME'S UP"), findsOneWidget);
+    expect(find.text('Stop'), findsOneWidget);
+  });
+
+  test('reads a running timer state from the native bridge', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    _installNativeMock(
+      state: {
+        'running': true,
+        'finished': false,
+        'endAt': 123456,
+        'totalMs': 5000,
+        'alarmUri': kBundledAlarmUri,
+        'alarmTitle': kBundledAlarmTitle,
+      },
+    );
+
+    final state = await NativeBridge.timerState();
+
+    expect(state?.running, isTrue);
+    expect(state?.finished, isFalse);
+    expect(state?.endAtMillis, 123456);
+    expect(state?.totalMillis, 5000);
+    expect(state?.alarmUri, kBundledAlarmUri);
   });
 }

@@ -3,7 +3,7 @@
 A small, friendly Flutter app for making French press coffee. Two things, done well:
 
 - **Water calculator** — enter the coffee weight and it shows how much water to add. Defaults: 14 g coffee, 1:16 ratio (224 ml).
-- **Brew timer** — starts at 2:25 (editable under Settings → Timer Duration), with −5 s / +5 s fine tuning. The value sits centered in a circular ring that starts full and drains as the timer runs. Past zero it keeps counting into negative time (e.g. `-00:05`), so you can see how long ago it finished. Background the app mid-brew and an ongoing **Brewing** notification shows the live countdown; at zero, an **Enjoy!** notification offers **Stop** and **+15 s** actions. The app ships with the Android Clock timer sound as its default; tap any sound in Settings to preview it.
+- **Brew timer** — starts at 2:25 (editable under Settings → Timer Duration), with −5 s / +5 s fine tuning. The value sits centered in a circular ring that starts full and drains as the timer runs. Past zero it keeps counting into negative time (e.g. `-00:05`), so you can see how long ago it finished. Start it and leave the app — the timer runs in an Android foreground service, so locking the screen, switching apps, or pressing Back won't stop it. An ongoing **Brewing** notification shows the countdown; at zero the alarm rings and an **Enjoy!** notification offers **Stop** and **+15 s** actions. The app ships with the Android Clock timer sound as its default; tap any sound in Settings to preview it.
 
 The coffee-to-water ratio, timer duration, and alarm sound are saved on the device.
 
@@ -69,7 +69,7 @@ adb shell am start -n com.kinonn.coffee_timer/.MainActivity
 
 ### Native bridge
 
-Alarms, notifications, and settings storage are handled by a small Android method-channel bridge in `MainActivity.kt`; there are no Flutter plugins. The only permission is Android 13's notification permission, requested when you start the timer. Implementation details are in [AGENTS.md](AGENTS.md).
+Alarms, notifications, and settings storage are handled by a small Android method-channel bridge in `MainActivity.kt`, backed by a foreground `TimerService`; there are no Flutter plugins. The timer survives backgrounding, screen lock, and closing the task. Android 13's notification permission is requested when you start the timer; on Android 12+ the first start also offers exact-alarm access so the alarm stays on time under power saving. The service declares foreground-service, wake-lock, exact-alarm, and boot permissions. Implementation details are in [AGENTS.md](AGENTS.md).
 
 The bundled timer sound is `timer_expire.ogg` from the AOSP DeskClock app, used under the Apache License 2.0.
 
@@ -87,7 +87,7 @@ The Dart UI runs on iOS as-is, but the `coffee_timer/native` bridge is Android-o
 
 ## Notes
 
-The alarm and notifications need the app process to stay alive. See [AGENTS.md](AGENTS.md) for details and the foreground-service upgrade path.
+The timer runs in an Android foreground service, backed by an `AlarmManager` alarm that is exact when you grant exact-alarm access. Force-stopping the app cancels its alarm; reopening the app can restore a running timer from its saved deadline. Rebooting clears the timer state. See [AGENTS.md](AGENTS.md) for details.
 
 ## Branding
 

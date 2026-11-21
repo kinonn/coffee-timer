@@ -18,9 +18,10 @@ const _coffeeTextStyle = TextStyle(
 );
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.settings});
+  const HomeScreen({super.key, required this.settings, this.timer});
 
   final BrewSettings settings;
+  final NativeTimerState? timer;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -52,6 +53,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   DateTime? _endsAt;
   Timer? _ticker;
   _TimerStatus _status = _TimerStatus.idle;
+  bool _exactAlarmPromptShown = false;
 
   @override
   void initState() {
@@ -61,6 +63,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _selected = initial;
     _remaining = initial;
     _total = initial;
+    _restoreTimer();
     _coffeeFocus.addListener(_handleCoffeeFocus);
     NativeBridge.notificationActions.addListener(_handleNotificationAction);
     WidgetsBinding.instance.addPostFrameCallback(
@@ -72,12 +75,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void dispose() {
     _ticker?.cancel();
     WidgetsBinding.instance.removeObserver(this);
-    unawaited(NativeBridge.cancelRunningNotification());
     NativeBridge.notificationActions.removeListener(_handleNotificationAction);
     _coffeeFocus.removeListener(_handleCoffeeFocus);
     _coffeeFocus.dispose();
     _coffeeController.dispose();
-    unawaited(NativeBridge.stopAlarm());
     super.dispose();
   }
 
@@ -85,30 +86,119 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
     if (state == AppLifecycleState.resumed) {
-      unawaited(NativeBridge.cancelRunningNotification());
+      unawaited(_syncTimer());
+    }
+  }
+
+  void _restoreTimer() {
+    final timer = widget.timer;
+    if (timer == null ||
+        timer.totalMillis <= 0 ||
+        (!timer.running && !timer.finished)) {
       return;
     }
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.detached) {
-      final endsAt = _endsAt;
-      if (_status == _TimerStatus.running && endsAt != null) {
-        unawaited(
-          NativeBridge.showRunningNotification(endsAt.millisecondsSinceEpoch),
-        );
+    _applyTimerState(timer, rearm: true);
+  }
+
+  Future<void> _syncTimer() async {
+    final timer = await NativeBridge.timerState();
+    if (!mounted || timer == null) return;
+    if (timer.totalMillis <= 0 || (!timer.running && !timer.finished)) {
+      if (_status == _TimerStatus.finished) {
+        _ticker?.cancel();
+        setState(() {
+          _status = _TimerStatus.idle;
+          _remaining = _selected;
+          _total = _selected;
+          _endsAt = null;
+        });
       }
+      return;
+    }
+    if (timer.finished && _status == _TimerStatus.running) return;
+    setState(() => _applyTimerState(timer, rearm: false));
+  }
+
+  void _applyTimerState(NativeTimerState timer, {required bool rearm}) {
+    final endAt = DateTime.fromMillisecondsSinceEpoch(timer.endAtMillis);
+    final left = endAt.difference(DateTime.now());
+    _ticker?.cancel();
+    _total = Duration(milliseconds: timer.totalMillis);
+    _endsAt = endAt;
+    _remaining = left;
+    _status = timer.finished || left <= Duration.zero
+        ? _TimerStatus.finished
+        : _TimerStatus.running;
+    _ticker = Timer.periodic(const Duration(milliseconds: 200), (_) => _tick());
+    if (rearm && _status == _TimerStatus.running) {
+      unawaited(
+        _startNativeTimer(
+          endsAt: endAt,
+          total: _total,
+          alarmUri: timer.alarmUri,
+          alarmTitle: timer.alarmTitle,
+        ),
+      );
+    }
+  }
+
+  Future<void> _startNativeTimer({
+    required DateTime endsAt,
+    required Duration total,
+    required String? alarmUri,
+    required String alarmTitle,
+  }) async {
+    final started = await NativeBridge.startTimer(
+      endAtMillis: endsAt.millisecondsSinceEpoch,
+      totalMillis: total.inMilliseconds,
+      alarmUri: alarmUri,
+      alarmTitle: alarmTitle,
+    );
+    if (started == false && mounted) {
+      _resetTimer();
+    }
+  }
+
+  Future<void> _offerExactAlarms() async {
+    if (_exactAlarmPromptShown) return;
+    _exactAlarmPromptShown = true;
+    if (await NativeBridge.canScheduleExactAlarms()) return;
+    if (!mounted) return;
+    final allow = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Allow exact alarms?'),
+        content: const Text(
+          'Android uses exact-alarm access to keep the brew alarm on time '
+          'when the phone is in power saving or the app is closed. '
+          'The timer still works without it.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Open settings'),
+          ),
+        ],
+      ),
+    );
+    if (allow == true) {
+      await NativeBridge.requestExactAlarms();
     }
   }
 
   void _handleNotificationAction() {
+    if (!mounted) return;
     final action = NativeBridge.notificationActions.value;
     if (action == null) return;
     NativeBridge.notificationActions.value = null;
     if (action == 'stop') {
       _resetTimer();
     } else if (action == 'add15') {
-      if (mounted) {
-        Navigator.of(context).popUntil((route) => route.isFirst);
-      }
+      Navigator.of(context).popUntil((route) => route.isFirst);
       _addFifteenSeconds();
     }
   }
@@ -188,21 +278,30 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final base = resuming ? _remaining : _selected;
     if (base <= Duration.zero) return;
     unawaited(NativeBridge.requestNotificationPermission());
-    unawaited(NativeBridge.cancelRunningNotification());
-    unawaited(NativeBridge.stopAlarm());
     _ticker?.cancel();
+    final total = resuming ? _total : _selected;
+    final endsAt = DateTime.now().add(base);
     setState(() {
-      if (!resuming) _total = _selected;
+      _total = total;
       _status = _TimerStatus.running;
       _remaining = base;
-      _endsAt = DateTime.now().add(base);
+      _endsAt = endsAt;
     });
+    unawaited(
+      _startNativeTimer(
+        endsAt: endsAt,
+        total: total,
+        alarmUri: widget.settings.alarmUri,
+        alarmTitle: widget.settings.alarmTitle,
+      ),
+    );
+    unawaited(_offerExactAlarms());
     _ticker = Timer.periodic(const Duration(milliseconds: 200), (_) => _tick());
   }
 
   void _pauseTimer() {
     _ticker?.cancel();
-    unawaited(NativeBridge.cancelRunningNotification());
+    unawaited(NativeBridge.cancelTimer());
     final left = _endsAt?.difference(DateTime.now()) ?? _remaining;
     setState(() {
       _remaining = left > Duration.zero ? left : Duration.zero;
@@ -223,30 +322,35 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void _finishTimer() {
     setState(() => _status = _TimerStatus.finished);
     unawaited(HapticFeedback.heavyImpact());
-    unawaited(NativeBridge.cancelRunningNotification());
-    unawaited(NativeBridge.playAlarm(widget.settings.alarmUri, loop: true));
-    unawaited(NativeBridge.showTimerNotification());
   }
 
   void _addFifteenSeconds() {
     _ticker?.cancel();
     unawaited(NativeBridge.requestNotificationPermission());
-    unawaited(NativeBridge.stopAlarm());
     const extension = Duration(seconds: 15);
+    final endsAt = DateTime.now().add(extension);
     setState(() {
       _total = extension;
       _remaining = extension;
       _status = _TimerStatus.running;
-      _endsAt = DateTime.now().add(extension);
+      _endsAt = endsAt;
     });
+    unawaited(
+      _startNativeTimer(
+        endsAt: endsAt,
+        total: extension,
+        alarmUri: widget.settings.alarmUri,
+        alarmTitle: widget.settings.alarmTitle,
+      ),
+    );
+    unawaited(_offerExactAlarms());
     _ticker = Timer.periodic(const Duration(milliseconds: 200), (_) => _tick());
   }
 
   void _resetTimer() {
     _ticker?.cancel();
     _ticker = null;
-    unawaited(NativeBridge.cancelRunningNotification());
-    unawaited(NativeBridge.stopAlarm());
+    unawaited(NativeBridge.cancelTimer());
     setState(() {
       _status = _TimerStatus.idle;
       _remaining = _selected;
@@ -270,6 +374,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           _total = _selected;
         }
       });
+      final endsAt = _endsAt;
+      if (_status == _TimerStatus.running && endsAt != null) {
+        unawaited(
+          _startNativeTimer(
+            endsAt: endsAt,
+            total: _total,
+            alarmUri: widget.settings.alarmUri,
+            alarmTitle: widget.settings.alarmTitle,
+          ),
+        );
+      }
     }
   }
 

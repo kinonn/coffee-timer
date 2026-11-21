@@ -1,41 +1,25 @@
 package com.kinonn.coffee_timer
 
 import android.Manifest
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
+import android.app.AlarmManager
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.res.Configuration
-import android.graphics.Color
-import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.widget.RemoteViews
+import android.provider.Settings
+import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
-    private var player: MediaPlayer? = null
     private var previewPlayer: MediaPlayer? = null
     private var methodChannel: MethodChannel? = null
     private var pendingNotificationAction: String? = null
-    private var runningEndAt = 0L
-    private val runningHandler = Handler(Looper.getMainLooper())
-    private val runningUpdate = object : Runnable {
-        override fun run() {
-            if (runningEndAt == 0L) return
-            updateRunningNotification()
-            runningHandler.postDelayed(this, 1000L)
-        }
-    }
 
     private val prefs by lazy { getSharedPreferences("coffee_timer", MODE_PRIVATE) }
     private val defaultPresets = listOf(135, 145, 155)
@@ -54,17 +38,14 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "coffee_timer/native")
+        val channel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "coffee_timer/native"
+        )
         methodChannel = channel
         channel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "alarms" -> result.success(alarms())
-                "playAlarm" -> {
-                    val args = call.arguments as? Map<*, *>
-                    val uri = args?.get("uri") as? String
-                    val loop = args?.get("loop") as? Boolean ?: false
-                    result.success(playAlarm(uri, loop))
-                }
                 "playPreview" -> {
                     val args = call.arguments as? Map<*, *>
                     result.success(playPreview(args?.get("uri") as? String))
@@ -73,23 +54,33 @@ class MainActivity : FlutterActivity() {
                     stopPreview()
                     result.success(null)
                 }
-                "stopAlarm" -> {
-                    stopAlarm()
+                "startTimer" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val endAt = (args?.get("endAt") as? Number)?.toLong() ?: 0L
+                    val started = if (endAt > 0L) {
+                        TimerService.start(
+                            this,
+                            endAt = endAt,
+                            totalMs = (args?.get("totalMs") as? Number)?.toLong() ?: 0L,
+                            alarmUri = args?.get("alarmUri") as? String,
+                            alarmTitle = args?.get("alarmTitle") as? String
+                                ?: "Timer Event",
+                        )
+                    } else {
+                        false
+                    }
+                    result.success(started)
+                }
+                "cancelTimer" -> {
+                    TimerService.stop(this)
                     result.success(null)
                 }
-                "showTimerNotification" -> {
-                    showTimerNotification()
+                "canScheduleExactAlarms" -> result.success(canScheduleExactAlarms())
+                "requestExactAlarms" -> {
+                    requestExactAlarms()
                     result.success(null)
                 }
-                "showRunningNotification" -> {
-                    val endAt = (call.arguments as? Map<*, *>)?.get("endAt") as? Number
-                    if (endAt != null) startRunningNotification(endAt.toLong())
-                    result.success(null)
-                }
-                "cancelRunningNotification" -> {
-                    cancelRunningNotification()
-                    result.success(null)
-                }
+                "timerState" -> result.success(timerState())
                 "requestNotificationPermission" -> {
                     ensureNotificationPermission()
                     result.success(null)
@@ -112,201 +103,94 @@ class MainActivity : FlutterActivity() {
     private fun handleNotificationIntent(intent: Intent?) {
         val action = intent?.action ?: return
         val dartAction = when (action) {
-            ACTION_STOP -> "stop"
-            ACTION_ADD_15 -> "add15"
+            BrewNotifications.ACTION_STOP -> "stop"
+            BrewNotifications.ACTION_ADD_15 -> "add15"
             else -> return
         }
         intent.action = null
-        stopAlarm()
+        if (dartAction == "stop") {
+            TimerService.stop(this)
+        }
         pendingNotificationAction = dartAction
-        methodChannel?.invokeMethod("notificationAction", dartAction, object : MethodChannel.Result {
-            override fun success(result: Any?) {
-                pendingNotificationAction = null
-            }
+        methodChannel?.invokeMethod(
+            "notificationAction",
+            dartAction,
+            object : MethodChannel.Result {
+                override fun success(result: Any?) {
+                    pendingNotificationAction = null
+                }
 
-            override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
-                // Dart isn't ready yet; takeNotificationAction will pick it up.
-            }
+                override fun error(
+                    errorCode: String,
+                    errorMessage: String?,
+                    errorDetails: Any?,
+                ) {
+                    // Dart isn't ready yet; takeNotificationAction will pick it up.
+                }
 
-            override fun notImplemented() {
-                // Dart isn't ready yet; takeNotificationAction will pick it up.
-            }
-        })
-    }
-
-    @Suppress("DEPRECATION")
-    private fun showTimerNotification() {
-        ensureNotificationChannel()
-        if (!hasNotificationPermission()) return
-
-        val contentIntent = PendingIntent.getActivity(
-            this,
-            10,
-            Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val stopIntent = PendingIntent.getActivity(
-            this,
-            11,
-            Intent(this, MainActivity::class.java).apply {
-                action = ACTION_STOP
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val addIntent = PendingIntent.getActivity(
-            this,
-            12,
-            Intent(this, MainActivity::class.java).apply {
-                action = ACTION_ADD_15
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-        } else {
-            Notification.Builder(this).setPriority(Notification.PRIORITY_HIGH)
-        }
-
-        val contentView = RemoteViews(packageName, R.layout.notification_brew)
-        contentView.setOnClickPendingIntent(R.id.notification_stop, stopIntent)
-        contentView.setOnClickPendingIntent(R.id.notification_add, addIntent)
-        val nightMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
-        contentView.setTextColor(
-            R.id.notification_title,
-            if (nightMode == Configuration.UI_MODE_NIGHT_YES) {
-                Color.parseColor("#FAF3E9")
-            } else {
-                Color.parseColor("#33221A")
+                override fun notImplemented() {
+                    // Dart isn't ready yet; takeNotificationAction will pick it up.
+                }
             }
         )
+    }
 
-        builder
-            .setSmallIcon(R.drawable.ic_stat_coffee)
-            .setContentTitle("Enjoy!")
-            .setColor(Color.parseColor("#33221A"))
-            .setCategory(Notification.CATEGORY_ALARM)
-            .setVisibility(Notification.VISIBILITY_PUBLIC)
-            .setContentIntent(contentIntent)
-            .setAutoCancel(true)
-            .setOngoing(false)
-            .addAction(R.drawable.ic_stat_stop, "Stop", stopIntent)
-            .addAction(R.drawable.ic_stat_add, "+15 s", addIntent)
-            .setCustomContentView(contentView)
-
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            builder.setSound(null)
+    private fun timerState(): Map<String, Any?> {
+        val timer = TimerStore.read(this)
+        if (timer == null) {
+            return mapOf(
+                "running" to false,
+                "finished" to false,
+                "endAt" to 0L,
+                "totalMs" to 0L,
+                "alarmUri" to null,
+                "alarmTitle" to "Timer Event",
+            )
         }
-
-        getSystemService(NotificationManager::class.java)
-            ?.notify(NOTIFICATION_ID, builder.build())
-    }
-
-    private fun startRunningNotification(endAt: Long) {
-        runningEndAt = endAt
-        runningHandler.removeCallbacks(runningUpdate)
-        updateRunningNotification()
-        runningHandler.postDelayed(runningUpdate, 1000L)
-    }
-
-    private fun updateRunningNotification() {
-        showRunningNotification(formatTimerTime(runningEndAt - System.currentTimeMillis()))
-    }
-
-    private fun formatTimerTime(ms: Long): String {
-        val seconds = if (ms < 0) {
-            (-ms + 999) / 1000
-        } else {
-            (ms + 999) / 1000
-        }
-        val prefix = if (ms < 0) "-" else ""
-        return "$prefix%02d:%02d".format(seconds / 60, seconds % 60)
-    }
-
-    private fun showRunningNotification(time: String) {
-        ensureNotificationChannel()
-        if (!hasNotificationPermission()) return
-
-        val contentIntent = PendingIntent.getActivity(
-            this,
-            13,
-            Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        return mapOf(
+            "running" to true,
+            "finished" to timer.finished,
+            "endAt" to timer.endAt,
+            "totalMs" to timer.totalMs,
+            "alarmUri" to timer.alarmUri,
+            "alarmTitle" to timer.alarmTitle,
         )
-
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-        } else {
-            Notification.Builder(this).setPriority(Notification.PRIORITY_LOW)
-        }
-
-        builder
-            .setSmallIcon(R.drawable.ic_stat_coffee)
-            .setContentTitle("Brewing")
-            .setContentText(time)
-            .setColor(Color.parseColor("#33221A"))
-            .setCategory(Notification.CATEGORY_PROGRESS)
-            .setVisibility(Notification.VISIBILITY_PUBLIC)
-            .setContentIntent(contentIntent)
-            .setAutoCancel(false)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setShowWhen(false)
-
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            builder.setSound(null)
-        }
-
-        getSystemService(NotificationManager::class.java)
-            ?.notify(RUNNING_NOTIFICATION_ID, builder.build())
-    }
-
-    private fun hasNotificationPermission(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
-        return checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun cancelRunningNotification() {
-        runningEndAt = 0L
-        runningHandler.removeCallbacks(runningUpdate)
-        getSystemService(NotificationManager::class.java)?.cancel(RUNNING_NOTIFICATION_ID)
-    }
-
-    private fun ensureNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val manager = getSystemService(NotificationManager::class.java) ?: return
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) return
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Brew timer",
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = "Alerts when the French press timer finishes"
-            setSound(null, null)
-            enableVibration(false)
-            setShowBadge(false)
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-        }
-        manager.createNotificationChannel(channel)
     }
 
     private fun ensureNotificationPermission() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
             return
         }
         requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 5001)
     }
 
-    private fun cancelTimerNotification() {
-        getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
+    private fun canScheduleExactAlarms(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        return getSystemService(AlarmManager::class.java)?.canScheduleExactAlarms() == true
+    }
+
+    private fun requestExactAlarms() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        if (canScheduleExactAlarms()) return
+        try {
+            startActivity(
+                Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                    .setData(Uri.parse("package:$packageName"))
+            )
+        } catch (error: ActivityNotFoundException) {
+            Log.w("MainActivity", "Exact alarm settings unavailable", error)
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                        .setData(Uri.parse("package:$packageName"))
+                )
+            } catch (fallback: ActivityNotFoundException) {
+                Log.w("MainActivity", "App settings unavailable", fallback)
+            }
+        }
     }
 
     private fun alarms(): List<Map<String, String>> {
@@ -322,85 +206,23 @@ class MainActivity : FlutterActivity() {
         return sounds.sortedBy { it["title"]?.lowercase() }
     }
 
-    private fun playAlarm(uriString: String?, loop: Boolean): Boolean {
-        stopAlarm()
-        stopPreview()
-        val newPlayer = createPlayer(uriString, loop) ?: return false
-        player = newPlayer
-        return true
-    }
-
     private fun playPreview(uriString: String?): Boolean {
         stopPreview()
-        val newPlayer = createPlayer(uriString, false) ?: return false
+        val newPlayer = AlarmAudio.create(this, uriString, loop = false) ?: return false
         previewPlayer = newPlayer
         return true
     }
 
-    private fun createPlayer(uriString: String?, loop: Boolean): MediaPlayer? {
-        val mediaPlayer = MediaPlayer()
-        return try {
-            mediaPlayer.setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-            )
-            if (uriString == BUNDLED_ALARM_URI) {
-                val afd = resources.openRawResourceFd(R.raw.timer_event)
-                if (afd == null) {
-                    mediaPlayer.release()
-                    return null
-                }
-                afd.use {
-                    mediaPlayer.setDataSource(it.fileDescriptor, it.startOffset, it.length)
-                }
-            } else {
-                val defaultUri: Uri? = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                val uri: Uri? = if (uriString.isNullOrEmpty()) defaultUri else Uri.parse(uriString)
-                if (uri == null) {
-                    mediaPlayer.release()
-                    return null
-                }
-                mediaPlayer.setDataSource(this, uri)
-            }
-            mediaPlayer.isLooping = loop
-            mediaPlayer.prepare()
-            mediaPlayer.start()
-            mediaPlayer
-        } catch (_: Exception) {
-            mediaPlayer.release()
-            null
-        }
-    }
-
-    private fun stopAlarm() {
-        releasePlayer(player)
-        player = null
-        cancelTimerNotification()
-        cancelRunningNotification()
-    }
-
     private fun stopPreview() {
-        releasePlayer(previewPlayer)
+        AlarmAudio.release(previewPlayer)
         previewPlayer = null
-    }
-
-    private fun releasePlayer(mediaPlayer: MediaPlayer?) {
-        mediaPlayer ?: return
-        try {
-            if (mediaPlayer.isPlaying) mediaPlayer.stop()
-        } catch (_: Exception) {
-            // Already stopped.
-        }
-        mediaPlayer.release()
     }
 
     private fun loadSettings(): Map<String, Any?> {
         migrateSettings()
         return mapOf(
             "ratio" to prefs.getInt("ratio", 16),
-            "alarmUri" to prefs.getString("alarmUri", BUNDLED_ALARM_URI),
+            "alarmUri" to prefs.getString("alarmUri", AlarmAudio.BUNDLED_ALARM_URI),
             "alarmTitle" to prefs.getString("alarmTitle", "Timer Event"),
             "presets" to defaultPresets.mapIndexed { index, fallback ->
                 prefs.getInt("preset${index + 1}", fallback)
@@ -413,7 +235,7 @@ class MainActivity : FlutterActivity() {
         val savedTitle = prefs.getString("alarmTitle", null)
         val editor = prefs.edit().putInt("settingsVersion", 2)
         if (savedTitle == null || savedTitle == "System default") {
-            editor.putString("alarmUri", BUNDLED_ALARM_URI)
+            editor.putString("alarmUri", AlarmAudio.BUNDLED_ALARM_URI)
             editor.putString("alarmTitle", "Timer Event")
         }
         editor.apply()
@@ -439,17 +261,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         methodChannel = null
-        stopAlarm()
         stopPreview()
         super.onDestroy()
-    }
-
-    private companion object {
-        const val CHANNEL_ID = "brew_timer"
-        const val NOTIFICATION_ID = 2401
-        const val RUNNING_NOTIFICATION_ID = 2402
-        const val ACTION_STOP = "com.kinonn.coffee_timer.action.STOP_TIMER"
-        const val ACTION_ADD_15 = "com.kinonn.coffee_timer.action.ADD_15_SECONDS"
-        const val BUNDLED_ALARM_URI = "app:timer_event"
     }
 }

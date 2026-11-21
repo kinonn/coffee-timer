@@ -11,17 +11,19 @@ Future<void> main() async {
   NativeBridge.init();
   SystemChrome.setSystemUIOverlayStyle(appOverlayStyle);
   final settings = await BrewSettings.load();
+  final timer = await NativeBridge.timerState();
   final pendingAction = await NativeBridge.takeNotificationAction();
   if (pendingAction != null) {
     NativeBridge.notificationActions.value = pendingAction;
   }
-  runApp(CoffeeTimerApp(settings: settings));
+  runApp(CoffeeTimerApp(settings: settings, timer: timer));
 }
 
 class CoffeeTimerApp extends StatelessWidget {
-  const CoffeeTimerApp({super.key, required this.settings});
+  const CoffeeTimerApp({super.key, required this.settings, this.timer});
 
   final BrewSettings settings;
+  final NativeTimerState? timer;
 
   @override
   Widget build(BuildContext context) {
@@ -33,7 +35,7 @@ class CoffeeTimerApp extends StatelessWidget {
         value: appOverlayStyle,
         child: child ?? const SizedBox.shrink(),
       ),
-      home: HomeScreen(settings: settings),
+      home: HomeScreen(settings: settings, timer: timer),
     );
   }
 }

@@ -17,8 +17,28 @@ const kTimerEventAlarm = AlarmSound(
   title: kBundledAlarmTitle,
 );
 
+/// The timer Android is currently running, if any. The native service owns
+/// the alarm, so this is how the UI resumes after the Activity is recreated.
+class NativeTimerState {
+  const NativeTimerState({
+    required this.running,
+    required this.finished,
+    required this.endAtMillis,
+    required this.totalMillis,
+    this.alarmUri,
+    this.alarmTitle = kBundledAlarmTitle,
+  });
+
+  final bool running;
+  final bool finished;
+  final int endAtMillis;
+  final int totalMillis;
+  final String? alarmUri;
+  final String alarmTitle;
+}
+
 /// Everything the app needs from the Android side: system alarm sounds,
-/// alarm playback, and remembering the settings.
+/// the native timer service, and remembering the settings.
 class NativeBridge {
   static const _channel = MethodChannel('coffee_timer/native');
 
@@ -47,35 +67,77 @@ class NativeBridge {
     }
   }
 
-  static Future<void> showTimerNotification() async {
+  static Future<bool?> startTimer({
+    required int endAtMillis,
+    required int totalMillis,
+    required String? alarmUri,
+    required String alarmTitle,
+  }) async {
     try {
-      await _channel.invokeMethod<void>('showTimerNotification');
-    } on PlatformException {
-      // The alarm and in-app UI still work.
-    } on MissingPluginException {
-      // No notification bridge on this platform.
-    }
-  }
-
-  static Future<void> showRunningNotification(int endAtMillis) async {
-    try {
-      await _channel.invokeMethod<void>('showRunningNotification', {
+      return await _channel.invokeMethod<bool>('startTimer', {
         'endAt': endAtMillis,
+        'totalMs': totalMillis,
+        'alarmUri': alarmUri,
+        'alarmTitle': alarmTitle,
       });
     } on PlatformException {
-      // Best effort; the timer still counts down in-app.
+      // The native service refused the start; the caller should reset.
+      return false;
     } on MissingPluginException {
-      // No notification bridge on this platform.
+      // No native timer service on this platform; keep the Dart timer.
+      return null;
     }
   }
 
-  static Future<void> cancelRunningNotification() async {
+  static Future<void> cancelTimer() async {
     try {
-      await _channel.invokeMethod<void>('cancelRunningNotification');
+      await _channel.invokeMethod<void>('cancelTimer');
     } on PlatformException {
       // Nothing to cancel.
     } on MissingPluginException {
-      // No notification bridge on this platform.
+      // No native timer service on this platform.
+    }
+  }
+
+  static Future<bool> canScheduleExactAlarms() async {
+    try {
+      return await _channel.invokeMethod<bool>('canScheduleExactAlarms') ?? true;
+    } on PlatformException {
+      return true;
+    } on MissingPluginException {
+      // No native alarm on this platform.
+      return true;
+    }
+  }
+
+  static Future<void> requestExactAlarms() async {
+    try {
+      await _channel.invokeMethod<void>('requestExactAlarms');
+    } on PlatformException {
+      // The user can still enable it from system settings.
+    } on MissingPluginException {
+      // No native alarm on this platform.
+    }
+  }
+
+  static Future<NativeTimerState?> timerState() async {
+    try {
+      final raw = await _channel.invokeMapMethod<Object?, Object?>(
+        'timerState',
+      );
+      if (raw == null || raw.isEmpty) return null;
+      return NativeTimerState(
+        running: raw['running'] == true,
+        finished: raw['finished'] == true,
+        endAtMillis: (raw['endAt'] as num?)?.toInt() ?? 0,
+        totalMillis: (raw['totalMs'] as num?)?.toInt() ?? 0,
+        alarmUri: raw['alarmUri'] as String?,
+        alarmTitle: raw['alarmTitle'] as String? ?? kBundledAlarmTitle,
+      );
+    } on PlatformException {
+      return null;
+    } on MissingPluginException {
+      return null;
     }
   }
 
@@ -113,19 +175,6 @@ class NativeBridge {
     }
   }
 
-  static Future<void> playAlarm(String? uri, {bool loop = false}) async {
-    try {
-      await _channel.invokeMethod<void>('playAlarm', {
-        'uri': uri,
-        'loop': loop,
-      });
-    } on PlatformException {
-      // The timer still counts down; only the sound is unavailable.
-    } on MissingPluginException {
-      // No native alarm bridge on this platform.
-    }
-  }
-
   static Future<void> playPreview(String? uri) async {
     try {
       await _channel.invokeMethod<void>('playPreview', {'uri': uri});
@@ -139,16 +188,6 @@ class NativeBridge {
   static Future<void> stopPreview() async {
     try {
       await _channel.invokeMethod<void>('stopPreview');
-    } on PlatformException {
-      // Nothing to stop.
-    } on MissingPluginException {
-      // No native alarm bridge on this platform.
-    }
-  }
-
-  static Future<void> stopAlarm() async {
-    try {
-      await _channel.invokeMethod<void>('stopAlarm');
     } on PlatformException {
       // Nothing to stop.
     } on MissingPluginException {
